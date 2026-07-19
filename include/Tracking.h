@@ -36,6 +36,7 @@
 #include "System.h"
 #include "ImuTypes.h"
 #include "Settings.h"
+#include "KLTTracker.h" // For KLT tracking
 
 #include "GeometricCamera.h"
 
@@ -209,6 +210,7 @@ protected:
     bool TrackReferenceKeyFrame();
     void UpdateLastFrame();
     bool TrackWithMotionModel();
+    bool TrackWithKLT();
     bool PredictStateIMU();
 
     bool Relocalization();
@@ -260,6 +262,14 @@ protected:
     //ORB
     ORBextractor* mpORBextractorLeft, *mpORBextractorRight;
     ORBextractor* mpIniORBextractor;
+
+    // KLT
+    KLTTracker mKLTTracker{2, 0.03f, false};
+    cv::Mat mImGrayPrev;
+
+    // KLT hybrid tracking
+    int mnFramesSinceKeyFrame;
+    int mnKLTMaxFrames;
 
     //BoW
     ORBVocabulary* mpORBVocabulary;

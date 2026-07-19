@@ -286,11 +286,11 @@ Frame::Frame(const cv::Mat &imGray, const cv::Mat &imDepth, const double &timeSt
 }
 
 
-Frame::Frame(const cv::Mat &imGray, const double &timeStamp, ORBextractor* extractor,ORBVocabulary* voc, GeometricCamera* pCamera, cv::Mat &distCoef, const float &bf, const float &thDepth, Frame* pPrevF, const IMU::Calib &ImuCalib)
+Frame::Frame(const cv::Mat &imGray, const double &timeStamp, ORBextractor* extractor,ORBVocabulary* voc, GeometricCamera* pCamera, cv::Mat &distCoef, const float &bf, const float &thDepth, Frame* pPrevF, const IMU::Calib &ImuCalib, bool bExtractORB)
     :mpcpi(NULL),mpORBvocabulary(voc),mpORBextractorLeft(extractor),mpORBextractorRight(static_cast<ORBextractor*>(NULL)),
      mTimeStamp(timeStamp), mK(static_cast<Pinhole*>(pCamera)->toK()), mK_(static_cast<Pinhole*>(pCamera)->toK_()), mDistCoef(distCoef.clone()), mbf(bf), mThDepth(thDepth),
      mImuCalib(ImuCalib), mpImuPreintegrated(NULL),mpPrevFrame(pPrevF),mpImuPreintegratedFrame(NULL), mpReferenceKF(static_cast<KeyFrame*>(NULL)), mbIsSet(false), mbImuPreintegrated(false), mpCamera(pCamera),
-     mpCamera2(nullptr), mbHasPose(false), mbHasVelocity(false)
+     mpCamera2(nullptr), mbHasPose(false), mbHasVelocity(false), mbIsKLTFrame(false)
 {
     // Frame ID
     mnId=nNextId++;
@@ -304,35 +304,48 @@ Frame::Frame(const cv::Mat &imGray, const double &timeStamp, ORBextractor* extra
     mvLevelSigma2 = mpORBextractorLeft->GetScaleSigmaSquares();
     mvInvLevelSigma2 = mpORBextractorLeft->GetInverseScaleSigmaSquares();
 
-    // ORB extraction
+    if (bExtractORB)
+    {
+        // ORB extraction
 #ifdef REGISTER_TIMES
-    std::chrono::steady_clock::time_point time_StartExtORB = std::chrono::steady_clock::now();
+        std::chrono::steady_clock::time_point time_StartExtORB = std::chrono::steady_clock::now();
 #endif
-    ExtractORB(0,imGray,0,1000);
+        ExtractORB(0,imGray,0,1000);
 #ifdef REGISTER_TIMES
-    std::chrono::steady_clock::time_point time_EndExtORB = std::chrono::steady_clock::now();
+        std::chrono::steady_clock::time_point time_EndExtORB = std::chrono::steady_clock::now();
 
-    mTimeORB_Ext = std::chrono::duration_cast<std::chrono::duration<double,std::milli> >(time_EndExtORB - time_StartExtORB).count();
+        mTimeORB_Ext = std::chrono::duration_cast<std::chrono::duration<double,std::milli> >(time_EndExtORB - time_StartExtORB).count();
 #endif
 
+        N = mvKeys.size();
+        if(!mvKeys.empty())
+        {
+            UndistortKeyPoints();
 
-    N = mvKeys.size();
-    if(mvKeys.empty())
-        return;
+            // Set no stereo information
+            mvuRight = vector<float>(N,-1);
+            mvDepth = vector<float>(N,-1);
+            mnCloseMPs = 0;
 
-    UndistortKeyPoints();
+            mvpMapPoints = vector<MapPoint*>(N,static_cast<MapPoint*>(NULL));
 
-    // Set no stereo information
-    mvuRight = vector<float>(N,-1);
-    mvDepth = vector<float>(N,-1);
-    mnCloseMPs = 0;
+            mmProjectPoints.clear();
+            mmMatchedInImage.clear();
 
-    mvpMapPoints = vector<MapPoint*>(N,static_cast<MapPoint*>(NULL));
-
-    mmProjectPoints.clear();// = map<long unsigned int, cv::Point2f>(N, static_cast<cv::Point2f>(NULL));
-    mmMatchedInImage.clear();
-
-    mvbOutlier = vector<bool>(N,false);
+            mvbOutlier = vector<bool>(N,false);
+        }
+    }
+    else
+    {
+        N = 0;
+        mvuRight = vector<float>(0);
+        mvDepth = vector<float>(0);
+        mnCloseMPs = 0;
+        mvpMapPoints = vector<MapPoint*>(0);
+        mmProjectPoints.clear();
+        mmMatchedInImage.clear();
+        mvbOutlier = vector<bool>(0);
+    }
 
     // This is done only for the first Frame (or after a change in the calibration)
     if(mbInitialComputations)
@@ -364,7 +377,10 @@ Frame::Frame(const cv::Mat &imGray, const double &timeStamp, ORBextractor* extra
     monoLeft = -1;
     monoRight = -1;
 
-    AssignFeaturesToGrid();
+    if (bExtractORB)
+    {
+        AssignFeaturesToGrid();
+    }
 
     if(pPrevF)
     {
@@ -379,6 +395,30 @@ Frame::Frame(const cv::Mat &imGray, const double &timeStamp, ORBextractor* extra
     }
 
     mpMutexImu = new std::mutex();
+}
+
+void Frame::InitFromKLT(const std::vector<cv::KeyPoint> &keys, const std::vector<int> &matchedIndices, const Frame &prevFrame)
+{
+    N = keys.size();
+    mvKeys = keys;
+    mbIsKLTFrame = true;
+
+    mvKeysUn.resize(N);
+    mDescriptors = cv::Mat(N, 32, CV_8U);
+    mvpMapPoints.resize(N, static_cast<MapPoint*>(NULL));
+    mvbOutlier.resize(N, false);
+    mvuRight.resize(N, -1);
+    mvDepth.resize(N, -1);
+
+    for (int i = 0; i < N; ++i)
+    {
+        int prevIdx = matchedIndices[i];
+        prevFrame.mDescriptors.row(prevIdx).copyTo(mDescriptors.row(i));
+        mvpMapPoints[i] = prevFrame.mvpMapPoints[prevIdx];
+    }
+
+    UndistortKeyPoints();
+    AssignFeaturesToGrid();
 }
 
 
