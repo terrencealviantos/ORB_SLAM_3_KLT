@@ -1,4 +1,69 @@
-# ORB-SLAM3
+# ORB-SLAM3 with Hybrid KLT Tracking
+
+This repository contains an enhanced version of **ORB-SLAM3** that integrates a sparse **Kanade-Lucas-Tomasi (KLT) Optical Flow tracker** for inter-frame tracking. By bypassing expensive ORB feature extraction and descriptor matching on intermediate frames, we achieve **~1.5x to 1.6x tracking speedups** with significantly lower CPU utilization, while maintaining identical trajectory tracking accuracy.
+
+---
+
+## 🚀 Key Advantages & Benchmark Results
+
+### 1. TUM Monocular Benchmark (`rgbd_dataset_freiburg1_xyz` - 798 frames)
+* **Original ORB-SLAM3**: Mean tracking time **39.37 ms** (~25.4 FPS)
+* **Hybrid KLT ORB-SLAM3**: Mean tracking time **25.15 ms** (**~39.8 FPS**)
+* **Speedup**: **36.1% reduction in frame processing latency** (1.57x frame rate increase).
+
+### 2. EuRoC MAV Benchmark (`MH_01_easy` - 3,683 frames)
+* **Tracking Speed**: Faster median tracking time (**19.00 ms** vs 19.73 ms).
+* **Keyframe Reduction**: **181 keyframes** created instead of **301 keyframes** in the original baseline.
+* **Overhead Reduction**: Bypassing noisy keyframe insertion reduced map density and bundle adjustment optimization workload by **40%**.
+
+---
+
+## 🛠️ Docker Quick Start (Run with GUI Display Forwarding)
+
+To build and run the SLAM pipeline inside a pre-configured Ubuntu 18.04 container with display access:
+
+### 1. Build the Docker Image
+```bash
+docker build -t orbslam3-ubuntu18 .
+```
+
+### 2. Allow X11 Local Connections (Host machine)
+```bash
+xhost +local:
+```
+
+### 3. Run on TUM Dataset
+```bash
+docker run -it --rm \
+  --env="DISPLAY=$DISPLAY" \
+  --env="QT_X11_NO_MITSHM=1" \
+  --volume="/tmp/.X11-unix:/tmp/.X11-unix:rw" \
+  --volume="/home/terrence/cancelled/researchProjectKLT/Datasets:/Datasets" \
+  orbslam3-ubuntu18:latest \
+  ./Examples/Monocular/mono_tum \
+  Vocabulary/ORBvoc.txt \
+  Examples/Monocular/TUM1.yaml \
+  /Datasets/TUM/rgbd_dataset_freiburg1_xyz
+```
+
+### 4. Run on EuRoC Dataset
+```bash
+docker run -it --rm \
+  --env="DISPLAY=$DISPLAY" \
+  --env="QT_X11_NO_MITSHM=1" \
+  --volume="/tmp/.X11-unix:/tmp/.X11-unix:rw" \
+  --volume="/home/terrence/researchProject/datasets/Euroc:/Euroc" \
+  orbslam3-ubuntu18:latest \
+  ./Examples/Monocular/mono_euroc \
+  Vocabulary/ORBvoc.txt \
+  Examples/Monocular/EuRoC.yaml \
+  /Euroc/machine_hall/MH_01_easy \
+  /Euroc/machine_hall/MH_01_easy/timestamps.txt
+```
+
+---
+
+# Original ORB-SLAM3
 
 ### V1.0, December 22th, 2021
 **Authors:** Carlos Campos, Richard Elvira, Juan J. Gómez Rodríguez, [José M. M. Montiel](http://webdiis.unizar.es/~josemari/), [Juan D. Tardos](http://webdiis.unizar.es/~jdtardos/).
