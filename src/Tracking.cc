@@ -28,6 +28,24 @@
 #include "KannalaBrandt8.h"
 #include "MLPnPsolver.h"
 #include "GeometricTools.h"
+
+#include <chrono>
+#include <string>
+#include <iostream>
+
+class ScopedTimer {
+public:
+    ScopedTimer(const std::string& name)
+        : name_(name), start_(std::chrono::high_resolution_clock::now()) {}
+    ~ScopedTimer() {
+        auto end = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double, std::milli> elapsed = end - start_;
+        std::cout << "[Timer] " << name_ << " took " << elapsed.count() << " ms" << std::endl;
+    }
+private:
+    std::string name_;
+    std::chrono::time_point<std::chrono::high_resolution_clock> start_;
+};
 #include "KLTTracker.h"
 
 #include <iostream>
@@ -1615,8 +1633,11 @@ Sophus::SE3f Tracking::GrabImageMonocular(const cv::Mat &im, const double &times
             {
                 // Run full ORB — this frame will be a keyframe candidate
                 std::cout << "[Hybrid] ORB frame (keyframe candidate)" << std::endl;
-                mCurrentFrame = Frame(mImGray,timestamp,mpORBextractorLeft,
-                                    mpORBVocabulary,mpCamera,mDistCoef,mbf,mThDepth);
+                {
+                    ScopedTimer t("ORB_Feature_Extraction");
+                    mCurrentFrame = Frame(mImGray,timestamp,mpORBextractorLeft,
+                                        mpORBVocabulary,mpCamera,mDistCoef,mbf,mThDepth);
+                }
                 mnFramesSinceKeyFrame = 0;
             }
             else
@@ -1624,22 +1645,32 @@ Sophus::SE3f Tracking::GrabImageMonocular(const cv::Mat &im, const double &times
                 // Run KLT — cheap inter-frame tracking
                 std::cout << "[Hybrid] KLT frame " << mnFramesSinceKeyFrame << std::endl;
                 std::vector<int> vMatchedIndices;
-                std::vector<cv::KeyPoint> trackedKeys = mKLTTracker.Track(
-                    mImGrayPrev, mImGray, mLastFrame.mvKeys, vMatchedIndices
-                );
+                std::vector<cv::KeyPoint> trackedKeys;
+                {
+                    ScopedTimer t("KLT_Optical_Flow");
+                    trackedKeys = mKLTTracker.Track(
+                        mImGrayPrev, mImGray, mLastFrame.mvKeys, vMatchedIndices
+                    );
+                }
 
                 if(!trackedKeys.empty() && trackedKeys.size() >= 20)
                 {
-                    mCurrentFrame = Frame(mImGray,timestamp,mpORBextractorLeft,
-                                        mpORBVocabulary,mpCamera,mDistCoef,mbf,mThDepth,
-                                        nullptr, IMU::Calib(), false);
-                    mCurrentFrame.InitFromKLT(trackedKeys, vMatchedIndices, mLastFrame);
+                    {
+                        ScopedTimer t("KLT_Frame_Initialization");
+                        mCurrentFrame = Frame(mImGray,timestamp,mpORBextractorLeft,
+                                            mpORBVocabulary,mpCamera,mDistCoef,mbf,mThDepth,
+                                            nullptr, IMU::Calib(), false);
+                        mCurrentFrame.InitFromKLT(trackedKeys, vMatchedIndices, mLastFrame);
+                    }
                 }
                 else
                 {
                     std::cout << "[Hybrid] KLT tracked too few points (" << trackedKeys.size() << "), falling back to full ORB" << std::endl;
-                    mCurrentFrame = Frame(mImGray,timestamp,mpORBextractorLeft,
-                                        mpORBVocabulary,mpCamera,mDistCoef,mbf,mThDepth);
+                    {
+                        ScopedTimer t("ORB_Feature_Extraction");
+                        mCurrentFrame = Frame(mImGray,timestamp,mpORBextractorLeft,
+                                            mpORBVocabulary,mpCamera,mDistCoef,mbf,mThDepth);
+                    }
                     mnFramesSinceKeyFrame = 0;
                 }
             }
@@ -1660,7 +1691,10 @@ Sophus::SE3f Tracking::GrabImageMonocular(const cv::Mat &im, const double &times
     mImGrayPrev = mImGray.clone();
 
     lastID = mCurrentFrame.mnId;
-    Track();
+    {
+        ScopedTimer t("SLAM_Pose_Optimization");
+        Track();
+    }
 
     return mCurrentFrame.GetPose();
 }
