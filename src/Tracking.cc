@@ -66,7 +66,8 @@ Tracking::Tracking(System *pSys, ORBVocabulary* pVoc, FrameDrawer *pFrameDrawer,
     mbReadyToInitializate(false), mpSystem(pSys), mpViewer(NULL), bStepByStep(false),
     mpFrameDrawer(pFrameDrawer), mpMapDrawer(pMapDrawer), mpAtlas(pAtlas), mnLastRelocFrameId(0), time_recently_lost(5.0),
     mnInitialFrameId(0), mbCreatedMap(false), mnFirstFrameId(0), mpCamera2(nullptr), mpLastKeyFrame(static_cast<KeyFrame*>(NULL)),
-    mnFramesSinceKeyFrame(0), mnKLTMaxFrames(10) //Added from AI
+    mbKLTEnabled(true), mnKLTMaxFrames(0), mnKLTMinTracked(50), mbKLTStereo(true), mnKLTRefFrameId(0), mnKLTFramesInARow(0),
+    mbKLTRequestORB(false), mnKLTFrames(0), mnORBFrames(0), mnKLTFallbacks(0)
 {
     // Load camera parameters from settings file
     if(settings){
@@ -112,6 +113,11 @@ Tracking::Tracking(System *pSys, ORBVocabulary* pVoc, FrameDrawer *pFrameDrawer,
 
             }
         }
+    }
+
+    {
+        cv::FileStorage fSettings(strSettingPath, cv::FileStorage::READ);
+        ParseKLTParamFile(fSettings);
     }
 
     initID = 0; lastID = 0;
@@ -1444,6 +1450,80 @@ bool Tracking::ParseIMUParamFile(cv::FileStorage &fSettings)
     return true;
 }
 
+void Tracking::ParseKLTParamFile(cv::FileStorage &fSettings)
+{
+    // All KLT parameters are optional
+    int nWinSize = 21, nPyrLevels = 3, nMaxIter = 30;
+    float fEpsilon = 0.01f, fMaxFBError = 1.0f;
+    mbKLTEnabled = true;
+    mbKLTStereo = true;
+    mnKLTMaxFrames = mMaxFrames;
+    mnKLTMinTracked = 50;
+
+    if(fSettings.isOpened())
+    {
+        cv::FileNode node = fSettings["KLT.Enabled"];
+        if(!node.empty() && node.isInt())
+            mbKLTEnabled = node.operator int() != 0;
+
+        node = fSettings["KLT.Stereo"];
+        if(!node.empty() && node.isInt())
+            mbKLTStereo = node.operator int() != 0;
+
+        node = fSettings["KLT.MaxFrames"];
+        if(!node.empty() && node.isInt())
+            mnKLTMaxFrames = node.operator int();
+
+        node = fSettings["KLT.MinTracked"];
+        if(!node.empty() && node.isInt())
+            mnKLTMinTracked = node.operator int();
+
+        node = fSettings["KLT.WinSize"];
+        if(!node.empty() && node.isInt())
+            nWinSize = node.operator int();
+
+        node = fSettings["KLT.PyrLevels"];
+        if(!node.empty() && node.isInt())
+            nPyrLevels = node.operator int();
+
+        node = fSettings["KLT.MaxIterations"];
+        if(!node.empty() && node.isInt())
+            nMaxIter = node.operator int();
+
+        node = fSettings["KLT.Epsilon"];
+        if(!node.empty() && node.isReal())
+            fEpsilon = node.real();
+
+        node = fSettings["KLT.MaxFBError"];
+        if(!node.empty() && (node.isReal() || node.isInt()))
+            fMaxFBError = node.real();
+    }
+
+    mKLTTracker = KLTTracker(nWinSize, nPyrLevels, nMaxIter, fEpsilon, fMaxFBError);
+
+    cout << endl << "KLT Parameters: " << endl;
+    cout << "- Enabled: " << mbKLTEnabled << endl;
+    if(mpCamera2)
+        cout << "- Stereo with two camera models: KLT is not used" << endl;
+    cout << "- Max consecutive KLT frames: " << mnKLTMaxFrames << endl;
+    cout << "- Min tracked points: " << mnKLTMinTracked << endl;
+    cout << "- Window size: " << nWinSize << ", pyramid levels: " << nPyrLevels << endl;
+    cout << "- Forward-backward threshold: " << fMaxFBError << endl;
+    if(mSensor==System::STEREO || mSensor==System::IMU_STEREO)
+        cout << "- Stereo optical flow: " << mbKLTStereo << endl;
+}
+
+void Tracking::PrintKLTStats()
+{
+    const int nFrames = mnKLTFrames + mnORBFrames;
+    if(nFrames==0)
+        return;
+
+    cout << endl << "KLT hybrid tracking: " << nFrames << " frames, " << mnKLTFrames << " KLT ("
+         << 100.0*mnKLTFrames/nFrames << "%), " << mnORBFrames << " ORB, "
+         << mnKLTFallbacks << " KLT fallbacks to ORB" << endl;
+}
+
 void Tracking::SetLocalMapper(LocalMapping *pLocalMapper)
 {
     mpLocalMapper=pLocalMapper;
@@ -1508,16 +1588,11 @@ Sophus::SE3f Tracking::GrabImageStereo(const cv::Mat &imRectLeft, const cv::Mat 
         }
     }
 
+    mImGrayRight = imGrayRight;
+
     //cout << "Incoming frame creation" << endl;
 
-    if (mSensor == System::STEREO && !mpCamera2)
-        mCurrentFrame = Frame(mImGray,imGrayRight,timestamp,mpORBextractorLeft,mpORBextractorRight,mpORBVocabulary,mK,mDistCoef,mbf,mThDepth,mpCamera);
-    else if(mSensor == System::STEREO && mpCamera2)
-        mCurrentFrame = Frame(mImGray,imGrayRight,timestamp,mpORBextractorLeft,mpORBextractorRight,mpORBVocabulary,mK,mDistCoef,mbf,mThDepth,mpCamera,mpCamera2,mTlr);
-    else if(mSensor == System::IMU_STEREO && !mpCamera2)
-        mCurrentFrame = Frame(mImGray,imGrayRight,timestamp,mpORBextractorLeft,mpORBextractorRight,mpORBVocabulary,mK,mDistCoef,mbf,mThDepth,mpCamera,&mLastFrame,*mpImuCalib);
-    else if(mSensor == System::IMU_STEREO && mpCamera2)
-        mCurrentFrame = Frame(mImGray,imGrayRight,timestamp,mpORBextractorLeft,mpORBextractorRight,mpORBVocabulary,mK,mDistCoef,mbf,mThDepth,mpCamera,mpCamera2,mTlr,&mLastFrame,*mpImuCalib);
+    CreateCurrentFrame(timestamp);
 
     //cout << "Incoming frame ended" << endl;
 
@@ -1530,8 +1605,15 @@ Sophus::SE3f Tracking::GrabImageStereo(const cv::Mat &imRectLeft, const cv::Mat 
 #endif
 
     //cout << "Tracking start" << endl;
-    Track();
+    {
+        ScopedTimer t("SLAM_Pose_Optimization");
+        Track();
+    }
     //cout << "Tracking end" << endl;
+
+    // The current image is the KLT reference of the next frame
+    mKLTTracker.SetReference(mImGray);
+    mnKLTRefFrameId = mCurrentFrame.mnId;
 
     return mCurrentFrame.GetPose();
 }
@@ -1560,15 +1642,9 @@ Sophus::SE3f Tracking::GrabImageRGBD(const cv::Mat &imRGB,const cv::Mat &imD, co
     if((fabs(mDepthMapFactor-1.0f)>1e-5) || imDepth.type()!=CV_32F)
         imDepth.convertTo(imDepth,CV_32F,mDepthMapFactor);
 
-    if (mSensor == System::RGBD)
-        mCurrentFrame = Frame(mImGray,imDepth,timestamp,mpORBextractorLeft,mpORBVocabulary,mK,mDistCoef,mbf,mThDepth,mpCamera);
-    else if(mSensor == System::IMU_RGBD)
-        mCurrentFrame = Frame(mImGray,imDepth,timestamp,mpORBextractorLeft,mpORBVocabulary,mK,mDistCoef,mbf,mThDepth,mpCamera,&mLastFrame,*mpImuCalib);
+    mImDepth = imDepth;
 
-
-
-
-
+    CreateCurrentFrame(timestamp);
 
     mCurrentFrame.mNameFile = filename;
     mCurrentFrame.mnDataset = mnNumDataset;
@@ -1577,7 +1653,14 @@ Sophus::SE3f Tracking::GrabImageRGBD(const cv::Mat &imRGB,const cv::Mat &imD, co
     vdORBExtract_ms.push_back(mCurrentFrame.mTimeORB_Ext);
 #endif
 
-    Track();
+    {
+        ScopedTimer t("SLAM_Pose_Optimization");
+        Track();
+    }
+
+    // The current image is the KLT reference of the next frame
+    mKLTTracker.SetReference(mImGray);
+    mnKLTRefFrameId = mCurrentFrame.mnId;
 
     return mCurrentFrame.GetPose();
 }
@@ -1601,81 +1684,7 @@ Sophus::SE3f Tracking::GrabImageMonocular(const cv::Mat &im, const double &times
             cvtColor(mImGray,mImGray,cv::COLOR_BGRA2GRAY);
     }
 
-    // if (mSensor == System::MONOCULAR)
-    // {
-    //     if(mState==NOT_INITIALIZED || mState==NO_IMAGES_YET ||(lastID - initID) < mMaxFrames)
-    //         mCurrentFrame = Frame(mImGray,timestamp,mpIniORBextractor,mpORBVocabulary,mpCamera,mDistCoef,mbf,mThDepth);
-    //     else
-    //         mCurrentFrame = Frame(mImGray,timestamp,mpORBextractorLeft,mpORBVocabulary,mpCamera,mDistCoef,mbf,mThDepth);
-    // }
-    // else if(mSensor == System::IMU_MONOCULAR)
-    // {
-    //     if(mState==NOT_INITIALIZED || mState==NO_IMAGES_YET)
-    //     {
-    //         mCurrentFrame = Frame(mImGray,timestamp,mpIniORBextractor,mpORBVocabulary,mpCamera,mDistCoef,mbf,mThDepth,&mLastFrame,*mpImuCalib);
-    //     }
-    //     else
-    //         mCurrentFrame = Frame(mImGray,timestamp,mpORBextractorLeft,mpORBVocabulary,mpCamera,mDistCoef,mbf,mThDepth,&mLastFrame,*mpImuCalib);
-    // }
-
-    if (mSensor == System::MONOCULAR)
-    {
-        if(mState==NOT_INITIALIZED || mState==NO_IMAGES_YET ||(lastID - initID) < mMaxFrames)
-            mCurrentFrame = Frame(mImGray,timestamp,mpIniORBextractor,mpORBVocabulary,mpCamera,mDistCoef,mbf,mThDepth);
-        else
-        {
-            mnFramesSinceKeyFrame++;
-
-            bool bNeedKeyFrame = (mnFramesSinceKeyFrame >= mnKLTMaxFrames) ||
-                                mImGrayPrev.empty() || mLastFrame.mvKeys.empty();
-
-            if(bNeedKeyFrame)
-            {
-                // Run full ORB — this frame will be a keyframe candidate
-                std::cout << "[Hybrid] ORB frame (keyframe candidate)" << std::endl;
-                {
-                    ScopedTimer t("ORB_Feature_Extraction");
-                    mCurrentFrame = Frame(mImGray,timestamp,mpORBextractorLeft,
-                                        mpORBVocabulary,mpCamera,mDistCoef,mbf,mThDepth);
-                }
-                mnFramesSinceKeyFrame = 0;
-            }
-            else
-            {
-                // Run KLT — cheap inter-frame tracking
-                std::cout << "[Hybrid] KLT frame " << mnFramesSinceKeyFrame << std::endl;
-                std::vector<int> vMatchedIndices;
-                std::vector<cv::KeyPoint> trackedKeys;
-                {
-                    ScopedTimer t("KLT_Optical_Flow");
-                    trackedKeys = mKLTTracker.Track(
-                        mImGrayPrev, mImGray, mLastFrame.mvKeys, vMatchedIndices
-                    );
-                }
-
-                if(!trackedKeys.empty() && trackedKeys.size() >= 20)
-                {
-                    {
-                        ScopedTimer t("KLT_Frame_Initialization");
-                        mCurrentFrame = Frame(mImGray,timestamp,mpORBextractorLeft,
-                                            mpORBVocabulary,mpCamera,mDistCoef,mbf,mThDepth,
-                                            nullptr, IMU::Calib(), false);
-                        mCurrentFrame.InitFromKLT(trackedKeys, vMatchedIndices, mLastFrame);
-                    }
-                }
-                else
-                {
-                    std::cout << "[Hybrid] KLT tracked too few points (" << trackedKeys.size() << "), falling back to full ORB" << std::endl;
-                    {
-                        ScopedTimer t("ORB_Feature_Extraction");
-                        mCurrentFrame = Frame(mImGray,timestamp,mpORBextractorLeft,
-                                            mpORBVocabulary,mpCamera,mDistCoef,mbf,mThDepth);
-                    }
-                    mnFramesSinceKeyFrame = 0;
-                }
-            }
-        }
-    }
+    CreateCurrentFrame(timestamp);
 
     if (mState==NO_IMAGES_YET)
         t0=timestamp;
@@ -1687,16 +1696,280 @@ Sophus::SE3f Tracking::GrabImageMonocular(const cv::Mat &im, const double &times
     vdORBExtract_ms.push_back(mCurrentFrame.mTimeORB_Ext);
 #endif
 
-    // Store grayscale for next frame KLT
-    mImGrayPrev = mImGray.clone();
-
     lastID = mCurrentFrame.mnId;
     {
         ScopedTimer t("SLAM_Pose_Optimization");
         Track();
     }
 
+    // The current image is the KLT reference of the next frame
+    mKLTTracker.SetReference(mImGray);
+    mnKLTRefFrameId = mCurrentFrame.mnId;
+
     return mCurrentFrame.GetPose();
+}
+
+
+void Tracking::CreateCurrentFrame(const double &timestamp)
+{
+    if(UseKLTForCurrentFrame())
+    {
+        bool bKLT;
+        {
+            ScopedTimer t("KLT_Optical_Flow");
+            bKLT = CreateKLTFrame(timestamp);
+        }
+
+        if(bKLT)
+        {
+            mnKLTFramesInARow++;
+            mnKLTFrames++;
+            std::cout << "[Hybrid] KLT frame " << mnKLTFramesInARow << " (" << mCurrentFrame.N << " points)" << std::endl;
+            return;
+        }
+
+        std::cout << "[Hybrid] KLT tracked too few points, extracting ORB" << std::endl;
+    }
+
+    {
+        ScopedTimer t("ORB_Feature_Extraction");
+        CreateORBFrame(timestamp);
+    }
+    std::cout << "[Hybrid] ORB frame (keyframe candidate)" << std::endl;
+}
+
+
+void Tracking::CreateORBFrame(const double &timestamp)
+{
+    mnKLTFramesInARow = 0;
+    mbKLTRequestORB = false;
+    mnORBFrames++;
+
+    switch(mSensor)
+    {
+    case System::MONOCULAR:
+        if(mState==NOT_INITIALIZED || mState==NO_IMAGES_YET ||(lastID - initID) < mMaxFrames)
+            mCurrentFrame = Frame(mImGray,timestamp,mpIniORBextractor,mpORBVocabulary,mpCamera,mDistCoef,mbf,mThDepth);
+        else
+            mCurrentFrame = Frame(mImGray,timestamp,mpORBextractorLeft,mpORBVocabulary,mpCamera,mDistCoef,mbf,mThDepth);
+        break;
+    case System::IMU_MONOCULAR:
+        if(mState==NOT_INITIALIZED || mState==NO_IMAGES_YET)
+            mCurrentFrame = Frame(mImGray,timestamp,mpIniORBextractor,mpORBVocabulary,mpCamera,mDistCoef,mbf,mThDepth,&mLastFrame,*mpImuCalib);
+        else
+            mCurrentFrame = Frame(mImGray,timestamp,mpORBextractorLeft,mpORBVocabulary,mpCamera,mDistCoef,mbf,mThDepth,&mLastFrame,*mpImuCalib);
+        break;
+    case System::STEREO:
+        if(!mpCamera2)
+            mCurrentFrame = Frame(mImGray,mImGrayRight,timestamp,mpORBextractorLeft,mpORBextractorRight,mpORBVocabulary,mK,mDistCoef,mbf,mThDepth,mpCamera);
+        else
+            mCurrentFrame = Frame(mImGray,mImGrayRight,timestamp,mpORBextractorLeft,mpORBextractorRight,mpORBVocabulary,mK,mDistCoef,mbf,mThDepth,mpCamera,mpCamera2,mTlr);
+        break;
+    case System::IMU_STEREO:
+        if(!mpCamera2)
+            mCurrentFrame = Frame(mImGray,mImGrayRight,timestamp,mpORBextractorLeft,mpORBextractorRight,mpORBVocabulary,mK,mDistCoef,mbf,mThDepth,mpCamera,&mLastFrame,*mpImuCalib);
+        else
+            mCurrentFrame = Frame(mImGray,mImGrayRight,timestamp,mpORBextractorLeft,mpORBextractorRight,mpORBVocabulary,mK,mDistCoef,mbf,mThDepth,mpCamera,mpCamera2,mTlr,&mLastFrame,*mpImuCalib);
+        break;
+    case System::RGBD:
+        mCurrentFrame = Frame(mImGray,mImDepth,timestamp,mpORBextractorLeft,mpORBVocabulary,mK,mDistCoef,mbf,mThDepth,mpCamera);
+        break;
+    case System::IMU_RGBD:
+        mCurrentFrame = Frame(mImGray,mImDepth,timestamp,mpORBextractorLeft,mpORBVocabulary,mK,mDistCoef,mbf,mThDepth,mpCamera,&mLastFrame,*mpImuCalib);
+        break;
+    }
+}
+
+
+bool Tracking::UseKLTForCurrentFrame()
+{
+    if(!mbKLTEnabled || mbKLTRequestORB)
+        return false;
+
+    // Stereo fisheye frames hold the keypoints of both cameras, KLT frames only support one camera
+    if(mpCamera2)
+        return false;
+
+    // KLT needs a tracked last frame (relocalization and map initialization need ORB features)
+    if(mState!=OK || (mbOnlyTracking && mbVO))
+        return false;
+
+    if(!mKLTTracker.HasReference() || mnKLTRefFrameId!=mLastFrame.mnId || !mLastFrame.isSet() || !mLastFrame.mpReferenceKF || !mpReferenceKF)
+        return false;
+
+    // Monocular uses the initializer extractor during the first frames
+    if(mSensor==System::MONOCULAR && (lastID - initID) < mMaxFrames)
+        return false;
+
+    // Track with ORB features for one second after a relocalization (tracking is checked more strictly there)
+    if(Frame::nNextId < mnLastRelocFrameId+mMaxFrames)
+        return false;
+
+    if(mnKLTFramesInARow >= mnKLTMaxFrames)
+        return false;
+
+    return true;
+}
+
+
+bool Tracking::CreateKLTFrame(const double &timestamp)
+{
+    // Track the keypoints of the last frame associated to MapPoints. Keypoints without
+    // MapPoint do not help to estimate the pose.
+    vector<cv::Point2f> vLastPts;
+    vector<int> vLastIdx;
+    vLastPts.reserve(mLastFrame.N);
+    vLastIdx.reserve(mLastFrame.N);
+    for(int i=0; i<mLastFrame.N; i++)
+    {
+        MapPoint* pMP = mLastFrame.mvpMapPoints[i];
+        if(pMP && !mLastFrame.mvbOutlier[i])
+        {
+            vLastPts.push_back(mLastFrame.mvKeys[i].pt);
+            vLastIdx.push_back(i);
+        }
+    }
+
+    if((int)vLastPts.size() < mnKLTMinTracked)
+        return false;
+
+    vector<cv::Point2f> vCurrPts;
+    vector<uchar> vStatus;
+    mKLTTracker.Track(mImGray, vLastPts, vCurrPts, vStatus);
+
+    vector<cv::KeyPoint> vKeys;
+    vector<int> vTrackedIdx;
+    vKeys.reserve(vLastPts.size());
+    vTrackedIdx.reserve(vLastPts.size());
+    for(size_t i=0; i<vLastPts.size(); i++)
+    {
+        if(!vStatus[i])
+            continue;
+
+        cv::KeyPoint kp = mLastFrame.mvKeys[vLastIdx[i]];
+        kp.pt = vCurrPts[i];
+        vKeys.push_back(kp);
+        vTrackedIdx.push_back(vLastIdx[i]);
+    }
+
+    if((int)vKeys.size() < mnKLTMinTracked)
+        return false;
+
+    const bool bInertial = mSensor==System::IMU_MONOCULAR || mSensor==System::IMU_STEREO || mSensor==System::IMU_RGBD;
+    if(bInertial)
+        mCurrentFrame = Frame(mLastFrame,timestamp,vKeys,vTrackedIdx,&mLastFrame,*mpImuCalib);
+    else
+        mCurrentFrame = Frame(mLastFrame,timestamp,vKeys,vTrackedIdx);
+
+    if(mSensor==System::RGBD || mSensor==System::IMU_RGBD)
+    {
+        mCurrentFrame.ComputeStereoFromRGBD(mImDepth);
+    }
+    else if((mSensor==System::STEREO || mSensor==System::IMU_STEREO) && mbKLTStereo)
+    {
+        // Find the tracked points in the right image. The initial guess is the disparity
+        // of the point in the last frame, or the one given by the depth of its MapPoint.
+        const int N = mCurrentFrame.N;
+        const Sophus::SE3f Tcw = mLastFrame.GetPose();
+        vector<cv::Point2f> vLeftPts(N), vRightPts(N);
+        for(int i=0; i<N; i++)
+        {
+            const int idx = vTrackedIdx[i];
+            float disparity = 0;
+            if(mLastFrame.mvuRight[idx]>=0)
+            {
+                disparity = mLastFrame.mvKeysUn[idx].pt.x - mLastFrame.mvuRight[idx];
+            }
+            else
+            {
+                const float z = (Tcw * mCurrentFrame.mvpMapPoints[i]->GetWorldPos())(2);
+                if(z>0)
+                    disparity = mbf/z;
+            }
+
+            vLeftPts[i] = mCurrentFrame.mvKeys[i].pt;
+            vRightPts[i] = cv::Point2f(vLeftPts[i].x - disparity, vLeftPts[i].y);
+        }
+
+        vector<uchar> vStereoStatus;
+        mKLTTracker.TrackStereo(mImGrayRight, vLeftPts, vRightPts, vStereoStatus);
+
+        // Same disparity range as ComputeStereoMatches. Images are rectified, so matches must lie on the same row.
+        const float minD = 0;
+        const float maxD = mbf/mCurrentFrame.mb;
+        for(int i=0; i<N; i++)
+        {
+            if(!vStereoStatus[i])
+                continue;
+
+            const float maxDy = 2.0f*mCurrentFrame.mvScaleFactors[mCurrentFrame.mvKeys[i].octave];
+            if(fabs(vRightPts[i].y - vLeftPts[i].y) > maxDy)
+                continue;
+
+            float disparity = vLeftPts[i].x - vRightPts[i].x;
+            if(disparity>=minD && disparity<maxD)
+            {
+                if(disparity<=0)
+                    disparity=0.01;
+                mCurrentFrame.mvDepth[i] = mbf/disparity;
+                mCurrentFrame.mvuRight[i] = vRightPts[i].x;
+            }
+        }
+    }
+
+    return true;
+}
+
+
+bool Tracking::TrackKLTFrame()
+{
+    if(!TrackWithKLT())
+        return false;
+
+    // Only visual odometry matches: do not track the local map (as in TrackWithMotionModel)
+    if(mbOnlyTracking && mbVO)
+        return true;
+
+    // The inertial optimization of TrackLocalMap releases the IMU constraint of the last frame.
+    // Keep a copy, it is needed if the frame has to be tracked again with ORB features.
+    ConstraintPoseImu* pLastCpi = mLastFrame.mpcpi ? new ConstraintPoseImu(*mLastFrame.mpcpi) : NULL;
+
+    const bool bOK = TrackLocalMap();
+
+    if(!bOK && !mLastFrame.mpcpi)
+    {
+        mLastFrame.mpcpi = pLastCpi;
+        pLastCpi = NULL;
+    }
+    delete pLastCpi;
+
+    return bOK;
+}
+
+
+void Tracking::FallbackToORB()
+{
+    mnKLTFallbacks++;
+    std::cout << "[Hybrid] KLT tracking failed, extracting ORB" << std::endl;
+
+    // Keep the IMU state of the frame, its preintegration was already computed
+    Frame kltFrame(mCurrentFrame);
+
+    {
+        ScopedTimer t("ORB_Feature_Extraction");
+        CreateORBFrame(kltFrame.mTimeStamp);
+    }
+    mnKLTFrames--;
+
+    mCurrentFrame.mNameFile = kltFrame.mNameFile;
+    mCurrentFrame.mnDataset = kltFrame.mnDataset;
+    mCurrentFrame.mpImuPreintegrated = kltFrame.mpImuPreintegrated;
+    mCurrentFrame.mpImuPreintegratedFrame = kltFrame.mpImuPreintegratedFrame;
+    mCurrentFrame.mpLastKeyFrame = kltFrame.mpLastKeyFrame;
+    mCurrentFrame.mImuBias = kltFrame.mImuBias;
+    mCurrentFrame.mPredBias = kltFrame.mPredBias;
+    if(kltFrame.imuIsPreintegrated())
+        mCurrentFrame.setIntegrated();
 }
 
 
@@ -2009,6 +2282,8 @@ void Tracking::Track()
     {
         // System is initialized. Track Frame.
         bool bOK;
+        // KLT frames are tracked against the local map in TrackKLTFrame()
+        bool bKLTTracked = false;
 
 #ifdef REGISTER_TIMES
         std::chrono::steady_clock::time_point time_StartPosePred = std::chrono::steady_clock::now();
@@ -2030,12 +2305,14 @@ void Tracking::Track()
                 if(mCurrentFrame.mbIsKLTFrame)
                 {
                     Verbose::PrintMess("TRACK: Track with KLT", Verbose::VERBOSITY_DEBUG);
-                    bOK = TrackWithKLT();
-                    if(!bOK)
-                    {
-                        Verbose::PrintMess("TRACK: KLT optimization failed. Falling back to TrackReferenceKeyFrame", Verbose::VERBOSITY_DEBUG);
-                        bOK = TrackReferenceKeyFrame();
-                    }
+                    bKLTTracked = TrackKLTFrame();
+                    if(!bKLTTracked)
+                        FallbackToORB();
+                }
+
+                if(bKLTTracked)
+                {
+                    bOK = true;
                 }
                 else if((!mbVelocity && !pCurrentMap->isImuInitialized()) || mCurrentFrame.mnId<mnLastRelocFrameId+2)
                 {
@@ -2141,8 +2418,19 @@ void Tracking::Track()
             {
                 if(!mbVO)
                 {
+                    if(mCurrentFrame.mbIsKLTFrame)
+                    {
+                        bKLTTracked = TrackKLTFrame();
+                        if(!bKLTTracked)
+                            FallbackToORB();
+                    }
+
                     // In last frame we tracked enough MapPoints in the map
-                    if(mbVelocity)
+                    if(bKLTTracked)
+                    {
+                        bOK = true;
+                    }
+                    else if(mbVelocity)
                     {
                         bOK = TrackWithMotionModel();
                     }
@@ -2217,7 +2505,7 @@ void Tracking::Track()
         // If we have an initial estimation of the camera pose and matching. Track the local map.
         if(!mbOnlyTracking)
         {
-            if(bOK)
+            if(bOK && !bKLTTracked)
             {
                 bOK = TrackLocalMap();
 
@@ -2230,7 +2518,7 @@ void Tracking::Track()
             // mbVO true means that there are few matches to MapPoints in the map. We cannot retrieve
             // a local map and therefore we do not perform TrackLocalMap(). Once the system relocalizes
             // the camera we will use the local map again.
-            if(bOK && !mbVO)
+            if(bOK && !mbVO && !bKLTTracked)
                 bOK = TrackLocalMap();
         }
 
@@ -2337,6 +2625,14 @@ void Tracking::Track()
             std::chrono::steady_clock::time_point time_StartNewKF = std::chrono::steady_clock::now();
 #endif
             bool bNeedKF = NeedNewKeyFrame();
+
+            // KLT frames have no features of their own to create a keyframe: extract ORB on the next frame instead
+            if(mCurrentFrame.mbIsKLTFrame)
+            {
+                if(bNeedKF)
+                    mbKLTRequestORB = true;
+                bNeedKF = false;
+            }
 
             // Check if we need to insert a new keyframe
             // if(bNeedKF && bOK)
@@ -2764,6 +3060,8 @@ void Tracking::CreateMapInAtlas()
 
     mnInitialFrameId = mCurrentFrame.mnId+1;
     mState = NO_IMAGES_YET;
+    mbKLTRequestORB = false;
+    mnKLTFramesInARow = 0;
 
     // Restart the variable with information about the last KF
     mbVelocity = false;
@@ -3044,25 +3342,45 @@ bool Tracking::TrackWithMotionModel()
 bool Tracking::TrackWithKLT()
 {
     // Update last frame pose according to its reference keyframe
-    UpdateLastFrame();
+    mLastFrame.SetPose(mlRelativeFramePoses.back() * mLastFrame.mpReferenceKF->GetPose());
 
-    // Initial pose prediction using constant velocity model
-    mCurrentFrame.SetPose(mVelocity * mLastFrame.GetPose());
-
-    // We already have mCurrentFrame.mvpMapPoints populated by InitFromKLT.
-    // Count how many we have:
+    // The MapPoint associations come from the last frame. Local Mapping might have replaced
+    // or culled some of those MapPoints in the meantime.
     int nmatches = 0;
     for(int i = 0; i < mCurrentFrame.N; i++)
     {
-        if(mCurrentFrame.mvpMapPoints[i])
+        MapPoint* pMP = mCurrentFrame.mvpMapPoints[i];
+        if(!pMP)
+            continue;
+
+        if(pMP->isBad())
+        {
+            MapPoint* pRep = pMP->GetReplaced();
+            pMP = (pRep && !pRep->isBad()) ? pRep : static_cast<MapPoint*>(NULL);
+            mCurrentFrame.mvpMapPoints[i] = pMP;
+        }
+
+        if(pMP)
             nmatches++;
     }
 
-    if(nmatches < 20)
+    if(nmatches < mnKLTMinTracked)
     {
         Verbose::PrintMess("Not enough KLT matches for Pose Optimization!!", Verbose::VERBOSITY_NORMAL);
         return false;
     }
+
+    if(mpAtlas->isImuInitialized() && (mCurrentFrame.mnId>mnLastRelocFrameId+mnFramesToResetIMU))
+    {
+        // Predict state with IMU, the inertial optimization of TrackLocalMap refines it and rejects outliers
+        return PredictStateIMU();
+    }
+
+    // Initial pose prediction using constant velocity model
+    if(mbVelocity)
+        mCurrentFrame.SetPose(mVelocity * mLastFrame.GetPose());
+    else
+        mCurrentFrame.SetPose(mLastFrame.GetPose());
 
     // Optimize frame pose with all matches
     Optimizer::PoseOptimization(&mCurrentFrame);
@@ -3078,12 +3396,7 @@ bool Tracking::TrackWithKLT()
                 MapPoint* pMP = mCurrentFrame.mvpMapPoints[i];
                 mCurrentFrame.mvpMapPoints[i] = static_cast<MapPoint*>(NULL);
                 mCurrentFrame.mvbOutlier[i] = false;
-                if(i < mCurrentFrame.Nleft){
-                    pMP->mbTrackInView = false;
-                }
-                else{
-                    pMP->mbTrackInViewR = false;
-                }
+                pMP->mbTrackInView = false;
                 pMP->mnLastFrameSeen = mCurrentFrame.mnId;
                 nmatches--;
             }
@@ -3094,15 +3407,15 @@ bool Tracking::TrackWithKLT()
         }
     }
 
-    std::cout << "[KLT] Pose optimization inliers: " << nmatchesMap << " / " << nmatches << std::endl;
-
     if(mbOnlyTracking)
     {
         mbVO = nmatchesMap < 10;
         return nmatches > 20;
     }
 
-    return nmatchesMap >= 10;
+    // Same inlier thresholds TrackLocalMap applies, so a weak KLT frame is tracked again with ORB
+    const int nMinInliers = (mSensor == System::IMU_MONOCULAR) ? 50 : 30;
+    return nmatchesMap >= nMinInliers;
 }
 
 bool Tracking::TrackLocalMap()
@@ -3222,9 +3535,6 @@ bool Tracking::TrackLocalMap()
 
 bool Tracking::NeedNewKeyFrame()
 {
-    if(mCurrentFrame.mbIsKLTFrame)
-        return false;
-
     if((mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD) && !mpAtlas->GetCurrentMap()->isImuInitialized())
     {
         if (mSensor == System::IMU_MONOCULAR && (mCurrentFrame.mTimeStamp-mpLastKeyFrame->mTimeStamp)>=0.25)
@@ -3523,6 +3833,10 @@ void Tracking::SearchLocalPoints()
             }
         }
     }
+
+    // All keypoints of a KLT frame are already associated to MapPoints, there is nothing to match
+    if(mCurrentFrame.mbIsKLTFrame)
+        return;
 
     int nToMatch=0;
 
@@ -3978,6 +4292,8 @@ void Tracking::Reset(bool bLocMap)
     KeyFrame::nNextId = 0;
     Frame::nNextId = 0;
     mState = NO_IMAGES_YET;
+    mbKLTRequestORB = false;
+    mnKLTFramesInARow = 0;
 
     mbReadyToInitializate = false;
     mbSetInit=false;
@@ -4037,6 +4353,8 @@ void Tracking::ResetActiveMap(bool bLocMap)
     mnLastInitFrameId = Frame::nNextId;
     //mnLastRelocFrameId = mnLastInitFrameId;
     mState = NO_IMAGES_YET; //NOT_INITIALIZED;
+    mbKLTRequestORB = false;
+    mnKLTFramesInARow = 0;
 
     mbReadyToInitializate = false;
 

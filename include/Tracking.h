@@ -68,6 +68,8 @@ public:
     bool ParseCamParamFile(cv::FileStorage &fSettings);
     bool ParseORBParamFile(cv::FileStorage &fSettings);
     bool ParseIMUParamFile(cv::FileStorage &fSettings);
+    void ParseKLTParamFile(cv::FileStorage &fSettings);
+    void PrintKLTStats();
 
     // Preprocess the input and call Track(). Extract features and performs stereo matching.
     Sophus::SE3f GrabImageStereo(const cv::Mat &imRectLeft,const cv::Mat &imRectRight, const double &timestamp, string filename);
@@ -210,8 +212,16 @@ protected:
     bool TrackReferenceKeyFrame();
     void UpdateLastFrame();
     bool TrackWithMotionModel();
-    bool TrackWithKLT();
     bool PredictStateIMU();
+
+    // KLT hybrid tracking
+    void CreateCurrentFrame(const double &timestamp);
+    void CreateORBFrame(const double &timestamp);
+    bool CreateKLTFrame(const double &timestamp);
+    bool UseKLTForCurrentFrame();
+    bool TrackWithKLT();
+    bool TrackKLTFrame();
+    void FallbackToORB();
 
     bool Relocalization();
 
@@ -263,13 +273,28 @@ protected:
     ORBextractor* mpORBextractorLeft, *mpORBextractorRight;
     ORBextractor* mpIniORBextractor;
 
-    // KLT
-    KLTTracker mKLTTracker{2, 0.03f, false};
-    cv::Mat mImGrayPrev;
-
-    // KLT hybrid tracking
-    int mnFramesSinceKeyFrame;
+    // KLT hybrid tracking: ORB features are only extracted on keyframe candidates, the frames
+    // in between are tracked with KLT optical flow from the last frame.
+    KLTTracker mKLTTracker;
+    bool mbKLTEnabled;
+    // Maximum number of consecutive KLT frames
     int mnKLTMaxFrames;
+    // Minimum number of tracked MapPoints to accept a KLT frame
+    int mnKLTMinTracked;
+    // Compute stereo depth of KLT frames with left-right optical flow (stereo only)
+    bool mbKLTStereo;
+
+    // Id of the frame whose image is the KLT reference
+    long unsigned int mnKLTRefFrameId;
+    int mnKLTFramesInARow;
+    // A KLT frame asked for a keyframe: extract ORB features on the next frame
+    bool mbKLTRequestORB;
+
+    // Statistics
+    int mnKLTFrames, mnORBFrames, mnKLTFallbacks;
+
+    // Images of the current frame, kept to extract ORB features if KLT tracking fails
+    cv::Mat mImGrayRight, mImDepth;
 
     //BoW
     ORBVocabulary* mpORBVocabulary;

@@ -521,6 +521,8 @@ void System::Shutdown()
 
     cout << "Shutdown" << endl;
 
+    mpTracker->PrintKLTStats();
+
     mpLocalMapper->RequestFinish();
     mpLoopCloser->RequestFinish();
     /*if(mpViewer)

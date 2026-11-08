@@ -65,9 +65,15 @@ public:
     Frame(const cv::Mat &imGray, const cv::Mat &imDepth, const double &timeStamp, ORBextractor* extractor,ORBVocabulary* voc, cv::Mat &K, cv::Mat &distCoef, const float &bf, const float &thDepth, GeometricCamera* pCamera,Frame* pPrevF = static_cast<Frame*>(NULL), const IMU::Calib &ImuCalib = IMU::Calib());
 
     // Constructor for Monocular cameras.
-    Frame(const cv::Mat &imGray, const double &timeStamp, ORBextractor* extractor,ORBVocabulary* voc, GeometricCamera* pCamera, cv::Mat &distCoef, const float &bf, const float &thDepth, Frame* pPrevF = static_cast<Frame*>(NULL), const IMU::Calib &ImuCalib = IMU::Calib(), bool bExtractORB = true);
+    Frame(const cv::Mat &imGray, const double &timeStamp, ORBextractor* extractor,ORBVocabulary* voc, GeometricCamera* pCamera, cv::Mat &distCoef, const float &bf, const float &thDepth, Frame* pPrevF = static_cast<Frame*>(NULL), const IMU::Calib &ImuCalib = IMU::Calib());
 
-    void InitFromKLT(const std::vector<cv::KeyPoint> &keys, const std::vector<int> &matchedIndices, const Frame &prevFrame);
+    // Constructor for frames tracked with KLT optical flow (any sensor without a second camera).
+    // No features are extracted: vKeys are keypoints of lastFrame tracked into the new image, vLastIdx their
+    // indices in lastFrame. Calibration, descriptors and MapPoint associations are taken from lastFrame.
+    // Stereo/depth information is left empty, it is filled afterwards by the tracker.
+    Frame(const Frame &lastFrame, const double &timeStamp, const std::vector<cv::KeyPoint> &vKeys, const std::vector<int> &vLastIdx, Frame* pPrevF = static_cast<Frame*>(NULL), const IMU::Calib &ImuCalib = IMU::Calib());
+
+    // True if the frame was tracked with KLT (it has no ORB features of its own and cannot become a keyframe).
     bool mbIsKLTFrame;
 
     // Destructor
